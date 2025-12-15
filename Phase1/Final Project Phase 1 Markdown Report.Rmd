@@ -1,0 +1,532 @@
+---
+title: "Final Project Phase 1 Markdown Report"
+output: html_document
+date: "2025-09-19"
+author: "Josh Gaughan"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(nflreadr)    # data access
+library(tidyverse)   # dplyr/ggplot/readr, etc.
+library(lubridate)   # dates/times
+library(janitor)     # clean_names, tabyl
+library(scales)      # pretty labels
+library(gt)          # presentation tables (not saved here)
+library(ggrepel)     # labels for charts
+library(zoo) 
+```
+
+# <u>Data Access</u>
+
+
+#### Defining team, season and schedule variables
+```{r}
+team = "IND"
+season = 2025
+
+sched <- load_schedules(seasons = season) %>% clean_names()
+```
+
+# <br>
+#### Filtering to find the Colts' week 1 game
+```{r}
+colts_g1 <- sched %>%
+  filter(game_type == "REG",
+         season == !!season,
+         home_team == !!team | away_team == !!team) %>%
+  arrange(gameday, week) %>%
+  slice(1)
+
+stopifnot(nrow(colts_g1) == 1)
+```
+
+# <br>
+#### Assigning Colts week 1 game attributes to new variables.
+```{r}
+game_id <- colts_g1$game_id
+week    <- colts_g1$week
+gameday <- colts_g1$gameday
+home_tm <- colts_g1$home_team
+away_tm <- colts_g1$away_team
+opp     <- ifelse(home_tm == team, away_tm, home_tm)
+
+message(glue::glue("Found Colts Week {week} ({gameday}): {away_tm} @ {home_tm} | game_id = {game_id}"))
+```
+# <br>
+#### Pulling play-by-play data for this specific game
+```{r}
+pbp_g1 <- load_pbp(seasons = season) %>%
+  clean_names() %>%
+  filter(game_id == !!game_id)
+```
+
+# <br>
+#### Pulling roster data for this specific game.
+```{r}
+rw_g1 <- load_rosters_weekly(seasons = season) %>%
+  clean_names() %>%
+  filter(week == !!week, team %in% c(team, opp))
+```
+
+# <br>
+#### Pulling official data for this specific game.
+```{r}
+officials_g1 <- load_officials(seasons = season) %>%
+  clean_names() %>%
+  filter(game_id == !!game_id)
+```
+
+# <br>
+#### Pulling player data
+```{r}
+players_master <- load_players() %>% clean_names()
+```
+
+# <u>Integrity Checks</u>
+
+# <br>
+
+#### Showing the dimensions of each data frame.
+```{r}
+cat("\n--- STRUCTURE ---\n")
+cat("PBP rows/cols:", nrow(pbp_g1), ncol(pbp_g1), "\n")
+cat("Weekly roster rows/cols:", nrow(rw_g1), ncol(rw_g1), "\n")
+cat("Officials rows/cols:", nrow(officials_g1), ncol(officials_g1), "\n\n")
+```
+
+# <br>
+#### Checking for duplicates in play-by-play
+```{r}
+dup_plays <- pbp_g1 %>%
+  count(game_id, play_id) %>%
+  filter(n > 1)
+
+if (nrow(dup_plays) > 0) {
+  warning("Duplicate plays detected in (game_id, play_id). Inspect `dup_plays`.")
+} else {
+  cat("Key check passed: (game_id, play_id) appear unique for this game.\n")
+}
+```
+
+# <br>
+#### Checking for duplicates in roster
+```{r}
+dup_roster <- rw_g1 %>%
+  count(team, gsis_id, week) %>%
+  filter(n > 1)
+if (nrow(dup_roster) > 0) {
+  message("Note: roster has repeated (team, gsis_id, week) rows—can be normal when multiple rows exist per role/slot.")
+}
+```
+
+# <br>
+#### Checking to see if players are present in players_master
+```{r}
+if ("gsis_id" %in% names(rw_g1) && "gsis_id" %in% names(players_master)) {
+  roster_master_match <- rw_g1 %>%
+    mutate(in_master = gsis_id %in% players_master$gsis_id) %>%
+    summarize(match_rate = mean(in_master, na.rm = TRUE))
+  cat("Player master match rate (weekly roster -> master by gsis_id):",
+      round(roster_master_match$match_rate*100, 1), "%\n")
+} else {
+  message("gsis_id not present to check roster->player master referential integrity.")
+}
+```
+
+# <br>
+#### Checking for missing data
+```{r}
+na_rate <- function(x) mean(is.na(x))
+na_summary <- pbp_g1 %>%
+  summarize(
+    na_epa          = na_rate(epa),
+    na_success      = na_rate(success),
+    na_posteam      = na_rate(posteam),
+    na_defteam      = na_rate(defteam),
+    na_yardline_100 = na_rate(yardline_100),
+    na_down         = na_rate(down),
+    na_ydstogo      = na_rate(ydstogo),
+    na_play_type    = na_rate(play_type)
+  )
+cat("\n--- MISSINGNESS (PBP) ---\n"); print(na_summary)
+```
+
+# <br>
+#### Checking to see if any yardline_100 is not in [0,100]
+```{r}
+bad_yardline <- pbp_g1 %>% filter(!is.na(yardline_100) & (yardline_100 < 0 | yardline_100 > 100))
+if (nrow(bad_yardline) > 0) warning("Out-of-range yardline_100 values observed.")
+```
+
+# <br>
+#### Checking to see if any downs are not in [1,4]
+```{r}
+bad_down <- pbp_g1 %>% filter(!is.na(down) & !(down %in% 1:4))
+if (nrow(bad_down) > 0) warning("Unexpected down values outside 1–4.")
+```
+
+# <br>
+#### Checking to see if any ydstogo are <= 0
+```{r}
+bad_ydstogo <- pbp_g1 %>% filter(!is.na(ydstogo) & ydstogo <= 0)
+if (nrow(bad_ydstogo) > 0) message("Non-positive ydstogo rows exist (could be goal-to-go anomalies or data glitches).")
+```
+
+# <br>
+#### Checking for conisistency in game_id
+```{r}
+if (length(unique(pbp_g1$game_id)) != 1) warning("Multiple game_ids in pbp_g1; filter may be off.")
+```
+
+# <br>
+#### Checking to see if posteam/defteam are correct
+```{r}
+valid_teams <- c(team, opp)
+weird_teams <- pbp_g1 %>%
+  filter(!is.na(posteam) & !(posteam %in% valid_teams)) %>%
+  distinct(posteam)
+if (nrow(weird_teams) > 0) warning("Found posteam not matching Colts or opponent: check `weird_teams`.")
+```
+
+# <br>
+#### Checking team abbreviations
+```{r}
+cat("\n--- TEAM ABBREVS IN PBP ---\n")
+print(sort(unique(na.omit(pbp_g1$posteam))))
+print(sort(unique(na.omit(pbp_g1$defteam))))
+```
+
+# <u>EDA & Visualizations</u>
+
+# <br>
+
+#### Create a points_scored column in pbp_g1
+```{r}
+pbp_g1 <- pbp_g1 %>%
+  mutate(
+    points_scored = case_when(
+      touchdown == 1 ~ 6,                               # Touchdowns
+      field_goal_result == "made" ~ 3,                  # Field goals
+      safety == 1 ~ 2,                                  # Safeties
+      extra_point_result == "good" ~ 1,                 # PAT kicks
+      two_point_attempt == 1 & two_point_conv_result == "success" ~ 2, # 2PT conversions
+      TRUE ~ 0
+    )
+  )
+
+```
+
+# <br>
+#### Produce a table with home/away team scoring and play amounts by quarter
+```{r}
+score_by_q <- pbp_g1 %>%
+  filter(!is.na(qtr), qtr %in% 1:4) %>%
+  group_by(qtr) %>%
+  summarize(
+    ind_points = sum(if_else(posteam == "IND", points_scored, 0), na.rm = TRUE),
+    opp_points = sum(if_else(posteam == opp,   points_scored, 0), na.rm = TRUE),
+    plays = n(),
+    .groups = "drop"
+  )
+cat("\n--- SCORE BY QUARTER (derived from PBP points events) ---\n")
+print(score_by_q)
+```
+
+# <br>
+#### Produce a table of average time per play for each team
+```{r}
+tempo <- pbp_g1 %>%
+  filter(!is.na(posteam), !is.na(game_seconds_remaining)) %>%
+  arrange(game_seconds_remaining) %>%
+  group_by(posteam) %>%
+  mutate(sec_between = lag(game_seconds_remaining) - game_seconds_remaining) %>%
+  summarize(sec_per_play = median(sec_between, na.rm = TRUE), .groups = "drop") %>%
+  filter(!is.na(sec_per_play))
+cat("\n--- TEMPO (median sec/play) ---\n"); print(tempo)
+```
+
+# <br>
+#### Produce a table with various offensive efficieny stats for each team
+```{r}
+off_mix <- pbp_g1 %>%
+  filter(!is.na(posteam)) %>%
+  mutate(play_family = case_when(
+    play_type %in% c("run") ~ "Run",
+    play_type %in% c("pass") ~ "Pass",
+    play_type %in% c("qb_kneel","qb_spike") ~ "Clock",
+    play_type %in% c("no_play","timeout") ~ "Other",
+    TRUE ~ "Other"
+  )) %>%
+  group_by(posteam, play_family) %>%
+  summarize(
+    plays          = n(),
+    share          = n()/nrow(pbp_g1),
+    epa_per_play   = mean(epa, na.rm = TRUE),
+    success_rate   = mean(success, na.rm = TRUE),
+    yards_per_play = mean(yards_gained, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(posteam, desc(plays))
+cat("\n--- OFFENSIVE MIX & EFFICIENCY ---\n"); print(off_mix, n = 50)
+```
+
+# <br>
+#### Produce a plot of EPA per play distribution for both teams
+```{r}
+epa_dist <- pbp_g1 %>%
+  filter(!is.na(posteam), play_type %in% c("run","pass")) %>%
+  mutate(is_colts = if_else(posteam == "IND", "Colts", "Opponent"))
+ggplot(epa_dist, aes(x = epa, fill = is_colts)) +
+  geom_histogram(bins = 40, alpha = 0.6, position = "identity") +
+  geom_vline(data = epa_dist %>% group_by(is_colts) %>% summarize(mu = mean(epa, na.rm = TRUE)),
+             aes(xintercept = mu, color = is_colts), linewidth = 0.9) +
+  scale_x_continuous(labels = number_format(accuracy = 0.1)) +
+  labs(title = "EPA distribution (pass & run plays)",
+       x = "EPA per play", y = "Count", fill = "", color = "") +
+  theme_minimal() + 
+  scale_fill_manual(values = c("Colts" = "blue", "Opponent" = "orange")) + scale_color_manual(values = c("Colts" = "blue", "Opponent" = "orange"))
+```
+
+# <br>
+#### Produce a plot of offensive success rate by yards to go and down
+```{r}
+situ <- pbp_g1 %>%
+  filter(!is.na(down), !is.na(ydstogo), play_type %in% c("pass","run")) %>%
+  mutate(
+    ytg_bucket = case_when(
+      ydstogo <= 2 ~ "1-2",
+      ydstogo <= 5 ~ "3-5",
+      ydstogo <= 10 ~ "6-10",
+      TRUE ~ "11+"
+    ),
+    down_lab = paste0("Down ", down)
+  ) %>%
+  mutate(ytg_bucket = factor(ytg_bucket, levels = c("1-2", "3-5", "6-10", "11+"))) %>%
+  
+  group_by(posteam, down_lab, ytg_bucket) %>%
+  summarize(
+    plays = n(),
+    success_rate = mean(success, na.rm = TRUE),
+    epa_per_play = mean(epa, na.rm = TRUE),
+    .groups = "drop")
+  
+ggplot(situ %>% filter(posteam %in% c("IND", opp)),
+       aes(x = ytg_bucket, y = success_rate, group = posteam, color = posteam)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  facet_wrap(~down_lab) +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Success rate by down & yards-to-go",
+       x = "Yards to go (bucket)", y = "Success rate", color = "Offense") + scale_color_manual(values = c("IND" = "blue", "MIA" = "orange")) +
+  theme_minimal()
+```
+
+# <br>
+#### Produce a plot of EPA per play for each team in specific sections of the field
+```{r}
+fieldpos <- pbp_g1 %>%
+  filter(!is.na(yardline_100), play_type %in% c("run","pass")) %>%
+  mutate(
+    field_zone = case_when(
+      yardline_100 >= 80 ~ "Own 20-0",
+      yardline_100 >= 50 ~ "Own 49-21",
+      yardline_100 >= 21 ~ "Opp 49-21",
+      TRUE ~ "Red Zone (<=20)"
+    )
+  ) %>%
+  mutate(field_zone = factor(field_zone, levels = c("Red Zone (<=20)", "Opp 49-21", "Own 49-21", "Own 20-0"))) %>%
+  
+  group_by(posteam, field_zone) %>%
+  summarize(
+    plays = n(),
+    epa_per_play = mean(epa, na.rm = TRUE),
+    success_rate = mean(success, na.rm = TRUE),
+    .groups = "drop"
+  )
+ggplot(fieldpos %>% filter(posteam %in% c("IND", opp)),
+       aes(x = field_zone, y = epa_per_play, fill = posteam)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  coord_flip() +
+  labs(title = "EPA/play by field zone",
+       x = "", y = "EPA per play", fill = "Offense") + scale_fill_manual(values = c("IND" = "blue", "MIA" = "orange")) +
+  theme_minimal()
+```
+
+# <br>
+#### Produce a table of various stats on scoring plays
+```{r}
+drive_sum <- pbp_g1 %>%
+  filter(!is.na(drive), !is.na(posteam)) %>%
+  group_by(posteam, drive) %>%
+  summarize(
+    plays        = n(),
+    yards        = sum(yards_gained, na.rm = TRUE),
+    points       = sum(points_scored, na.rm = TRUE),   # <-- FIXED
+    epa          = sum(epa, na.rm = TRUE),
+    success_rate = mean(success, na.rm = TRUE),
+    ended_score  = any(touchdown == 1 | field_goal_result == "made" | safety == 1, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(posteam, desc(points), desc(yards))
+head(drive_sum)
+```
+
+# <br>
+#### Produce a plot of total receiver EPA against targets
+```{r}
+colts_targets <- pbp_g1 %>%
+  filter(posteam == team, pass == 1) %>%
+  count(receiver_player_name, sort = TRUE, name = "targets")
+
+colts_rushers <- pbp_g1 %>%
+  filter(posteam == team, rush == 1) %>%
+  count(rusher_player_name, sort = TRUE, name = "rush_att")
+
+epa_by_receiver <- pbp_g1 %>%
+  filter(posteam == team, pass == 1, !is.na(receiver_player_name)) %>%
+  group_by(receiver_player_name) %>%
+  summarize(
+    targets = n(),
+    epa_sum = sum(epa, na.rm = TRUE),
+    epa_mean = mean(epa, na.rm = TRUE),
+    .groups = "drop"
+  ) %>% arrange(desc(epa_sum))
+
+ggplot(epa_by_receiver, aes(x = targets, y = epa_sum, label = receiver_player_name)) +
+  geom_point(size = 3) +
+  geom_text_repel(min.segment.length = 0) +
+  labs(title = "Colts receivers: total EPA vs targets",
+       x = "Targets", y = "Total EPA") +
+  theme_minimal()
+```
+
+# <br>
+#### Produce various penalty and special teams plots
+```{r}
+penalties <- pbp_g1 %>%
+  filter(!is.na(penalty)) %>%
+  mutate(off_def = if_else(penalty_team == posteam, "Offense", "Defense")) %>%
+  count(penalty_team, off_def, penalty_type, sort = TRUE)
+cat("\n--- PENALTIES ---\n"); print(penalties, n = 30)
+
+st_fg <- pbp_g1 %>%
+  filter(play_type == "field_goal") %>%
+  count(posteam, field_goal_result)
+st_punt <- pbp_g1 %>%
+  filter(play_type == "punt") %>%
+  summarize(punts = n(), avg_punt_yards = mean(yards_gained, na.rm = TRUE))
+cat("\n--- SPECIAL TEAMS ---\n"); print(list(field_goals = st_fg, punts = st_punt))
+```
+
+# <br>
+#### Produce a plot of EPA per play by quarter for each team
+```{r}
+epa_by_q <- pbp_g1 %>%
+  filter(qtr %in% 1:4, play_type %in% c("pass","run")) %>%
+  group_by(posteam, qtr) %>%
+  summarize(
+    epa_per_play = mean(epa, na.rm = TRUE),
+    success_rate = mean(success, na.rm = TRUE),
+    .groups = "drop"
+  )
+ggplot(epa_by_q, aes(x = factor(qtr), y = epa_per_play, group = posteam, color = posteam)) +
+  geom_line(linewidth = 1) + geom_point(size = 2) +
+  labs(title = "EPA/play by quarter", x = "Quarter", y = "EPA/play", color = "Offense") +
+  scale_color_manual(values = c("IND" = "blue", "MIA" = "orange")) +
+  theme_minimal() 
+```
+
+# <br>
+#### Produce a plot of the Colts' 10 play rolling pass completion rate
+```{r}
+colts_seq <- pbp_g1 %>%
+  filter(posteam == team, play_type %in% c("pass","run")) %>%
+  mutate(play_index = row_number(),
+         pass_flag  = if_else(play_type == "pass", 1, 0)) %>%
+  arrange(play_index)
+if (nrow(colts_seq) >= 10) {
+  colts_seq_roll <- colts_seq %>%
+    mutate(pass_rate_10 = zoo::rollapply(pass_flag, width = 10, FUN = mean,
+                                         align = "right", fill = NA_real_))
+  ggplot(colts_seq_roll, aes(x = play_index, y = pass_rate_10)) +
+    geom_line(linewidth = 1) +
+    scale_y_continuous(labels = percent) +
+    labs(title = "Colts rolling pass rate (10-play window)",
+         x = "Offensive play index", y = "Pass rate") +
+    theme_minimal()
+}
+```
+
+# <br>
+#### Produce a game summary
+```{r}
+colts_off <- pbp_g1 %>%
+  filter(posteam == team) %>%
+  summarize(
+    plays        = n(),
+    pass_plays   = sum(play_type == "pass", na.rm = TRUE),
+    rush_plays   = sum(play_type == "run",  na.rm = TRUE),
+    total_epa    = sum(epa, na.rm = TRUE),
+    mean_epa     = mean(epa, na.rm = TRUE),
+    success_rate = mean(success, na.rm = TRUE)
+  )
+
+plays_by_team_type <- pbp_g1 %>%
+  filter(!is.na(posteam)) %>%
+  count(posteam, play_type, sort = TRUE)
+
+cat("\n--- SUMMARY ---\n")
+print(list(
+  game_header = tibble(
+    season = season, week = week, gameday = gameday,
+    home = home_tm, away = away_tm, game_id = game_id, opp_for_colts = opp
+  ),
+  pbp_rows          = nrow(pbp_g1),
+  roster_rows       = nrow(rw_g1),
+  officials_rows    = nrow(officials_g1),
+  tempo_sec_per_play= tempo,
+  plays_by_team_type= plays_by_team_type,
+  colts_off_summary = colts_off
+))
+```
+
+
+# Separate Question and Answer Section
+```{r}
+epa_by_play = pbp_g1 %>%
+  filter(play_type %in% c("pass", "run")) %>%
+  group_by(posteam, play_type) %>%
+  summarize(mean_epa = mean(epa, na.rm = T), .groups = "drop")
+
+ggplot(epa_by_play, aes(x = play_type, y = mean_epa, fill = play_type)) + 
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ posteam) +
+  labs(
+    title = "Mean EPA by play type",
+    x = "Play Type",
+    y = "Mean EPA",
+    fill = "Play Type"
+    ) +
+  scale_fill_manual(values = c("pass" = "blue", "run" = "orange"))
+```
+
+```{r}
+yards_per_down = pbp_g1 %>%
+  filter(!is.na(down)) %>%
+  group_by(posteam, down) %>%
+  summarize(mean_yards_gained = mean(yards_gained, na.rm = T), .groups = "drop")
+
+ggplot(yards_per_down, aes(x = factor(down), y = mean_yards_gained, fill = posteam)) +
+  geom_bar(stat = "identity", "position" = "dodge") +
+  facet_wrap(~ posteam) +
+  labs(
+    title = "Average yards gained per down for each team",
+    x = "Down",
+    y = "Mean yards gained",
+    fill = "Team"
+  ) +
+  scale_fill_manual(values = c("IND" = "blue", "MIA" = "orange"))
+```
+
+
