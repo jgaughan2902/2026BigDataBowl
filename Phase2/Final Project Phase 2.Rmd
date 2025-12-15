@@ -1,0 +1,653 @@
+---
+title: "Final Project Phase 2"
+output: html_document
+date: "2025-10-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# <br>
+# Section 0: Loading necessary packages
+```{r, message=FALSE, warning = FALSE}
+library(tidyverse)
+library(dplyr)
+library(janitor)
+library(mgcv)
+library(shiny)
+```
+
+# <br>
+# Section 1: Importing Data
+
+# <br>
+#### Section 1.1: Importing the input (pre-pass) data
+```{r}
+path = "C:/All class folders/Fall 2025/Sports Analytics/Final Project Phase 2/nfl-big-data-bowl-2026-analytics/114239_nfl_competition_files_published_analytics_final/train"
+
+input_files = list.files(
+  path = path,
+  pattern = "^input_.*\\.csv$",
+  full.names = TRUE,
+  ignore.case = TRUE,
+  recursive = TRUE
+)
+
+input_data = input_files %>%
+  map_dfr(~read_csv(.x, show_col_types = F)) %>%
+  clean_names()
+```
+
+# <br>
+#### Section 1.2: Importing the output (post-pass) data
+```{r}
+output_files = list.files(
+  path = path,
+  pattern = "^output_.*\\.csv$",
+  full.names = TRUE,
+  ignore.case = TRUE,
+  recursive = TRUE
+)
+
+output_data = output_files %>%
+  map_dfr(~read_csv(.x, show_col_types = F))
+```
+
+# <br>
+#### Section 1.3: Importing the supplementary data
+```{r}
+supplementary_data = read_csv("C:/All class folders/Fall 2025/Sports Analytics/Final Project Phase 2/nfl-big-data-bowl-2026-analytics/114239_nfl_competition_files_published_analytics_final/supplementary_data.csv")
+```
+
+# <br>
+# Section 2: Data Integrity Checks
+
+# <br>
+#### Section 2.1: Checking for duplicates in the input data
+```{r}
+dup_plays_input <- input_data %>%
+  count(game_id, play_id, frame_id, nfl_id) %>%
+  filter(n > 1)
+
+if (nrow(dup_plays_input) > 0) {
+  warning ("Duplicate plays found")
+} else {
+  print("No duplicate plays found")
+}
+```
+
+# <br>
+#### Section 2.2: Checking for missingness in the input data
+```{r}
+na_input_count = colSums(is.na(input_data))
+print(data.frame(na_input_count))
+```
+
+# <br>
+#### Section 2.3: Input data range and logical checks
+```{r}
+bad_input_coords = input_data %>% filter(x < 0 | x > 120 | y < 0 | y > 53.3)
+if(nrow(bad_input_coords) > 0) {
+  warning ("Bad x or y coordinates found")
+  print(bad_input_coordinates)
+} else {
+  print("No coordinates found outside of range")
+}
+```
+
+# <br>
+#### Section 2.4: Checking for duplicates in the output data
+```{r}
+dup_plays_output <- output_data %>%
+  count(game_id, play_id, frame_id, nfl_id) %>%
+  filter(n > 1)
+
+if (nrow(dup_plays_output) > 0) {
+  warning ("Duplicate plays found")
+} else {
+  print("No duplicate plays found")
+}
+```
+
+# <br>
+#### Section 2.5: Checking for missingness in the output data
+```{r}
+na_output_count = colSums(is.na(output_data))
+print(na_output_count)
+```
+
+# <br>
+#### Section 2.6: Output data range and logical checks
+```{r}
+bad_output_coords = output_data %>% filter(x < 0 | x > 120 | y < 0 | y > 53.3)
+if(nrow(bad_output_coords) > 0) {
+  warning ("Bad x or y coordinates found")
+  print(bad_output_coords)
+} else {
+  print("No coordinates found outside of range")
+}
+```
+
+# <br>
+#### Section 2.7: Checking for duplicates in the supplementary data
+```{r}
+dup_plays_supplementary <- supplementary_data %>%
+  count(game_id, play_id) %>%
+  filter(n > 1)
+
+if (nrow(dup_plays_supplementary) > 0) {
+  warning ("Duplicate plays found")
+} else {
+  print("No duplicate plays found")
+}
+```
+
+# <br>
+#### Section 2.8: Checking for missingness in the supplementary data
+```{r}
+na_supplementary_count = colSums(is.na(supplementary_data))
+print(data.frame(na_supplementary_count))
+```
+
+# <br>
+#### Section 2.9: Supplementary data range and logical checks
+```{r}
+bad_supplementary_probability = supplementary_data %>% filter(pre_snap_home_team_win_probability < 0 | pre_snap_home_team_win_probability > 100)
+if(nrow(bad_supplementary_probability) > 0) {
+  warning ("Bad probabilities found")
+  print(bad_supplementary_probability)
+} else {
+  print("No probabilities found outside of range")
+}
+```
+
+# <br>
+# Section 3: Question 1: Exploratory Data Analysis and Visualizations
+
+# <br>
+#### Section 3.1: Check average pre and post throw frame times per game
+```{r}
+input_data %>%
+  group_by(game_id, play_id) %>%
+  summarise(frames_before_throw = max(frame_id)) %>%
+  summarise(mean_frames_before_throw = mean(frames_before_throw))
+
+output_data %>%
+  group_by(game_id, play_id) %>%
+  summarise(frames_after_throw = max(frame_id)) %>%
+  summarise(mean_frames_after_throw = mean(frames_after_throw))
+```
+
+# <br>
+#### Section 3.2: Frequency of route and coverage types
+```{r}
+supplementary_data %>%
+  count(route_of_targeted_receiver, sort = T)
+
+supplementary_data %>%
+  count(team_coverage_type, sort = T)
+
+ggplot(supplementary_data, aes(x = reorder(route_of_targeted_receiver, -table(route_of_targeted_receiver)[route_of_targeted_receiver]))) +
+  geom_bar(fill = "blue") + 
+  coord_flip() +
+  labs(title = "Frequency of receiver routes", x = "Route Type", y = "Count")
+
+ggplot(supplementary_data, aes(x = reorder(team_coverage_type, -table(team_coverage_type)[team_coverage_type]))) +
+  geom_bar(fill = "darkorange3") +
+  coord_flip() +
+  labs(title = "Frequency of coverage type", x = "Coverage Type", y = "Count")
+```
+
+# <br>
+# Section 4: Question 1 Main Analysis
+
+# <br>
+#### Section 4.1: Find distinct player roles
+```{r}
+roles = input_data %>%
+  select(game_id, play_id, nfl_id, player_role, player_side) %>%
+  distinct()
+```
+
+# <br>
+#### Section 4.2: Left join the output and input data on the 3 identifiers
+```{r}
+output_data_labeled = outp
+# 1. Fit the Simple GAM
+# This model includes only the smooth term for average ball-in-air separation.
+simple_gam <- gam(yards_gained ~ s(avg_separation_air), data = combined)
+
+# Print Summary (useful for seeing the significance and R-squared of the simple model)
+print(summary(simple_gam))
+
+
+# 2. Generate Data for the Smooth Curve
+# Create a sequence of separation values to predict the smooth line.
+new_data <- data.frame(
+  avg_separation_air = seq(min(combined$avg_separation_air, na.rm = TRUE), 
+                           max(combined$avg_separation_air, na.rm = TRUE), 
+                           length.out = 100)
+)
+
+# Predict the Yards Gained based ONLY on the simple GAM
+new_data$predicted_yards_gained <- predict(simple_gam, newdata = new_data, type = "response")
+
+# 3. Plot the Scatter and Overlay the Simple GAM Curve
+ggplot() +
+  
+  # Scatter Plot of Raw Data (to show the variance/noise)
+  geom_point(data = combined, 
+             aes(x = avg_separation_air, y = yards_gained), 
+             position = position_jitter(height = 0.3),
+            alpha = 0.5) +
+  
+  # The Smooth Curve from the Simple GAM
+  geom_line(data = new_data, 
+            aes(x = avg_separation_air, y = predicted_yards_gained), 
+            color = "darkorange", size = 1.5) +
+  
+  labs(
+    title = "The relationship between separation and yards gained",
+    subtitle = "A GAM smoother shown in orange",
+    x = "Average Ball-in-Air Separation (yards)",
+    y = "Yards Gained"
+  ) +
+  theme_minimal() +
+  xlim(0, 15) + ylim(0, 30)ut_data %>%
+  left_join(roles, by = c("game_id", "play_id", "nfl_id"))
+```
+
+# <br>
+#### Section 4.3: Filter targeted receivers
+```{r}
+receivers = output_data_labeled %>%
+  filter(player_role == "Targeted Receiver") %>%
+  select(game_id, play_id, frame_id, nfl_id, x, y)
+```
+
+# <br>
+#### Section 4.4: Filter defensive coverage players
+```{r}
+defenders = output_data_labeled %>%
+  filter(player_role == "Defensive Coverage") %>%
+  select(game_id, play_id, frame_id, nfl_id, x, y)
+```
+
+# <br>
+#### Section 4.5: Calculate Euclidean distance between receivers and defenders
+```{r}
+separation_output_data = receivers %>%
+  inner_join(defenders, by = c("game_id", "play_id", "frame_id"), suffix = c("_rec", "_def")) %>%
+  mutate(distance = sqrt((x_rec - x_def)^2 + (y_rec - y_def)^2)) %>%
+  group_by(game_id, play_id, frame_id, nfl_id_rec) %>%
+  summarise(separation = min(distance), .groups = "drop")
+```
+
+# <br>
+#### Section 4.6: Calculate the average separation
+```{r}
+avg_separation = separation_output_data %>%
+  group_by(game_id, play_id, nfl_id_rec) %>%
+  summarise(avg_separation_air = mean(separation, na.rm = T), .groups = "drop")
+```
+
+# <br>
+#### Section 4.7: Pull together relevant play information
+```{r}
+play_info = supplementary_data %>%
+  select(game_id, play_id, yards_gained, pass_result, route_of_targeted_receiver, team_coverage_type, pass_length)
+```
+
+# <br>
+#### Section 4.8: Create a joined data frame from avg_separation and play_info.
+```{r}
+combined = avg_separation %>%
+  left_join(play_info, by = c("game_id", "play_id"))
+
+combined_complete_only = combined %>% 
+  filter(pass_result == "C")
+```
+
+# <br>
+#### Section 4.9: A plot of average defender separation while the ball is in the air and the amount of yards_gained on the play
+```{r}
+ggplot(combined, aes(x = pass_length, y = yards_gained)) + geom_point(alpha = 0.5) + geom_smooth(method = "gam", se = T, col = "blue") + labs(
+  title = "Average ball-in-air defender separation against yards gained",
+  x = "Average Separation (yards)",
+  y = "Yards Gained"
+) + xlim(0, 20) + geom_jitter()
+```
+
+```{r}
+
+# 1. Fit the Simple GAM
+# This model includes only the smooth term for average ball-in-air separation.
+simple_gam <- gam(yards_gained ~ s(avg_separation_air), data = combined)
+
+# Print Summary (useful for seeing the significance and R-squared of the simple model)
+print(summary(simple_gam))
+
+
+# 2. Generate Data for the Smooth Curve
+# Create a sequence of separation values to predict the smooth line.
+new_data <- data.frame(
+  avg_separation_air = seq(min(combined$avg_separation_air, na.rm = TRUE), 
+                           max(combined$avg_separation_air, na.rm = TRUE), 
+                           length.out = 100)
+)
+
+# Predict the Yards Gained based ONLY on the simple GAM
+new_data$predicted_yards_gained <- predict(simple_gam, newdata = new_data, type = "response")
+
+# 3. Plot the Scatter and Overlay the Simple GAM Curve
+ggplot() +
+  
+  # Scatter Plot of Raw Data (to show the variance/noise)
+  geom_point(data = combined, 
+             aes(x = avg_separation_air, y = yards_gained), 
+             position = position_jitter(height = 0.3),
+            alpha = 0.5) +
+  
+  # The Smooth Curve from the Simple GAM
+  geom_line(data = new_data, 
+            aes(x = avg_separation_air, y = predicted_yards_gained), 
+            color = "darkorange", size = 1.5) +
+  
+  labs(
+    title = "The relationship between separation and yards gained",
+    subtitle = "A GAM smoother shown in orange",
+    x = "Average Ball-in-Air Separation (yards)",
+    y = "Yards Gained"
+  ) +
+  theme_minimal() +
+  xlim(0, 15)
+```
+
+
+# <br>
+#### Section 4.10: Models and plot
+```{r}
+#q1_gam = gam(yards_gained ~ s(avg_separation_air) + s(pass_length), data = combined)
+
+q1_gam2 = gam(yards_gained ~ s(avg_separation_air) + s(pass_length) + factor(route_of_targeted_receiver) + factor(team_coverage_type), data = combined)
+
+summary(q1_gam2)
+
+combined = combined %>%
+  mutate(
+    predicted_yards_gained = predict(q1_gam2, newdata = combined, type = "response")
+  )
+
+ggplot(combined, aes(x = avg_separation_air, y = predicted_yards_gained)) + geom_smooth(method = "gam", formula = y ~ s(x), color = "darkred", size = 1.5, se = TRUE) + labs(
+    title = "Model Prediction: Yards Gained vs. Average Separation",
+    subtitle = "Predictions are adjusted for Pass Length, Route, and Coverage",
+    x = "Average Ball-in-Air Separation (yards)",
+    y = "Predicted Yards Gained"
+  ) +
+  theme_minimal() + xlim(0,10)
+
+#q1_lm = lm(yards_gained ~ avg_separation_air + pass_length, data = combined)
+
+#desired_yards = tibble(pass_length = 10, avg_separation_air = seq(0, 6, by = 0.1))
+#pred = predict(q1_gam, newdata = desired_yards, interval = "confidence")
+
+#ggplot(data.frame(pred), aes(x = as.numeric(row.names(data.frame(pred))), y = pred)) + geom_point() + labs(title = "Predicted average separation required to acheive a certain yardage", x = "Yards Gained", y = "Ball-in-air separation (yards)")
+```
+
+
+```{r}
+# New Graph: Boxplot of Separation by Route Type
+ggplot(combined %>% filter(!is.na(route_of_targeted_receiver)), aes(x = reorder(route_of_targeted_receiver, avg_separation_air, FUN = median), y = avg_separation_air)) +
+  geom_boxplot() +
+  labs(
+    title = "Ball-in-Air Separation for each Receiver Route Type",
+    x = "Route Type",
+    y = "Ball-in-air separation (yards)"
+  ) +
+  theme(axis.text.y = element_text(size = 8)) +
+  ylim(0,20)
+
+ggplot(combined_yac %>% filter(!is.na(route_of_targeted_receiver)), aes(x = reorder(route_of_targeted_receiver, avg_separation_air, FUN = median), y = avg_separation_air)) +
+  geom_boxplot() +
+  labs(
+    title = "Ball-in-Air Separation for each Receiver Route Type",
+    x = "Route Type",
+    y = "Ball-in-air separation (yards)"
+  ) +
+  theme(axis.text.y = element_text(size = 8)) +
+  ylim(0,20)
+```
+
+
+```{r}
+combined_yac <- combined %>%
+  filter(pass_result == "C") %>% # Assuming 'C' means Complete
+  mutate(yac = yards_gained - pass_length)
+
+# Step 2: Plot YAC vs. Average Separation for Completions
+ggplot(combined_yac, aes(x = avg_separation_air, y = yac)) + geom_point(alpha = 0.2) + 
+  geom_smooth(method = "gam", formula = y ~ x, color = "blue", size = 1.2, se = TRUE) +
+  labs(
+    title = "Yards After Catch (YAC) vs. Average Separation (Completions Only)",
+    x = "Average Ball-in-Air Separation (yards)",
+    y = "Yards After Catch (yards)"
+  ) +
+  theme_minimal() + xlim(0,15)
+
+ggplot(combined, aes(x = avg_separation_air, y = pass_length)) + geom_point(alpha = 0.2) + 
+  geom_smooth(method = "lm", formula = y ~ x, color = "blue", size = 1.2, se = TRUE) +
+  labs(
+    title = "Pass Length vs. Average Separation (Completions Only)",
+    x = "Average Ball-in-Air Separation (yards)",
+    y = "Pass Length (yards)"
+  ) +
+  theme_minimal() + xlim(0,15)
+```
+
+```{r}
+q1_gam_interaction = gam(
+  # The 'by' argument creates a different smooth curve for each route type
+  yards_gained ~ 
+    s(avg_separation_air, by = factor(route_of_targeted_receiver)) + 
+    s(pass_length) + 
+    factor(team_coverage_type), 
+  data = combined
+)
+
+# Step A: Predict on the original data using the new interaction model
+# Filter for representatives of deep, intermediate, short, and screen
+key_routes = c("GO", "SLANT", "OUT", "SCREEN", "FLAT")
+
+combined_filtered <- combined %>%
+  filter(route_of_targeted_receiver %in% key_routes)
+
+ggplot(combined_filtered %>% filter(!is.na(route_of_targeted_receiver)), 
+       aes(x = avg_separation_air, y = predicted_yards_gained_interaction, color = route_of_targeted_receiver)) +
+  
+  geom_smooth(method = "gam", formula = y ~ s(x), se = FALSE, size = 1.5) + # Increased size for clarity
+  
+  labs(
+    title = "Effect of Separation on Yards Gained: Key Route Comparison",
+    subtitle = "Comparing Deep (GO), Intermediate (OUT), Short (FLAT/SLANT), and Screen",
+    x = "Average Ball-in-Air Separation (yards)",
+    y = "Predicted Yards Gained (adjusted)",
+    color = "Route Type"
+  ) +
+  theme_minimal() +
+  xlim(0, 15)
+```
+
+```{r}
+combined_yac <- combined %>%
+  filter(pass_result == "C") %>% # Assuming 'C' means Complete
+  mutate(yac = yards_gained - pass_length)
+
+# Step 2: Plot YAC vs. Average Separation for Completions
+ggplot(combined_yac, aes(x = avg_separation_air, y = yac)) +
+  # Use a linear smooth (lm) or a GAM to see if the relationship is linear
+  geom_smooth(method = "lm", formula = y ~ x, color = "darkgreen", size = 1.2, se = TRUE) +
+  geom_point(alpha = 0.2) + # Keep some transparency on the points
+  labs(
+    title = "Yards After Catch (YAC) vs. Average Separation (Completions Only)",
+    x = "Average Ball-in-Air Separation (yards)",
+    y = "Yards After Catch (yards)"
+  ) +
+  theme_minimal() + xlim(0, 20)
+```
+
+```{r}
+
+ggplot(combined %>% filter(!is.na(team_coverage_type)), aes(x = reorder(team_coverage_type, avg_separation_air, FUN = median), y = avg_separation_air)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+  coord_flip() +
+  labs(
+    title = "Average Separation by Defensive Coverage Type",
+    subtitle = "Which schemes take away the most space?",
+    x = "Coverage Type",
+    y = "Average Ball-in-Air Separation (yards)"
+  ) +
+  theme_minimal() + ylim(0,20)
+```
+
+```{r}
+# --- ASSUMPTIONS ---
+# 1. The 'combined' data frame with columns:
+#    'avg_separation_air', 'route_of_targeted_receiver', and 'team_coverage_type'
+#    is available in your R environment when you run the app.
+# 2. You have already loaded the data (e.g., using source() or read_csv() outside this app code).
+
+# Get unique coverage types for the dropdown filter
+coverage_choices <- sort(unique(combined$team_coverage_type))
+# Add an "ALL" option for viewing all data at once
+coverage_choices <- c("ALL", coverage_choices)
+
+
+# --- UI (User Interface) ---
+ui <- fluidPage(
+    # Set the dashboard title
+    titlePanel("Route Separation by Defensive Coverage Filter"),
+    
+    # Define the layout: sidebar for filters, main panel for the plot
+    sidebarLayout(
+        
+        # Sidebar Panel (The Filter)
+        sidebarPanel(
+            selectInput(
+                inputId = "coverage_select",
+                label = "Select Defensive Coverage:",
+                choices = coverage_choices,
+                selected = "ALL"
+            )
+        ),
+        
+        # Main Panel (The Plot)
+        mainPanel(
+            plotOutput("separation_boxplot")
+        )
+    )
+)
+
+
+# --- Server (Backend Logic) ---
+server <- function(input, output) {
+    
+    # 1. Reactive Data Filtering
+    # This filters the data whenever a new coverage is selected.
+    filtered_data <- reactive({
+        # Check if the user selected 'ALL'
+        if (input$coverage_select == "ALL") {
+            data_out <- combined
+        } else {
+            # Filter the data based on the selected coverage type
+            data_out <- combined %>%
+                filter(team_coverage_type == input$coverage_select)
+        }
+        
+        # Filter out NA routes to keep the graph clean
+        data_out <- data_out %>%
+            filter(!is.na(route_of_targeted_receiver))
+        
+        return(data_out)
+    })
+    
+    # 2. Render the Plot
+    # This renders the plot using the filtered data.
+    output$separation_boxplot <- renderPlot({
+        
+        # Plotting code, identical to your successful static plot, but uses filtered_data()
+        ggplot(filtered_data(), 
+               aes(x = reorder(route_of_targeted_receiver, avg_separation_air, FUN = median), 
+                   y = avg_separation_air)) +
+            
+            geom_boxplot(fill = "royalblue", alpha = 0.7) +
+            
+            labs(
+                title = paste("Average Separation for Routes vs.", input$coverage_select),
+                subtitle = "Median Separation by Route Type",
+                x = "Route Type",
+                y = "Ball-in-air separation (yards)"
+            ) +
+            # Flip coordinates for better readability of route names
+            theme_minimal() + 
+            ylim(0, 20) # Keep the Y-axis fixed for consistent comparison
+    })
+}
+
+# --- Run the application ---
+shinyApp(ui = ui, server = server)
+```
+
+```{r}
+# Create the binary outcome variable
+combined_prob <- combined %>%
+  # Assuming 'C' means completion in the 'pass_result' column
+  mutate(completion_flag = ifelse(pass_result == "C", 1, 0)) %>%
+  # Filter out plays where separation wasn't calculated (e.g., untargeted passes)
+  filter(!is.na(avg_separation_air))
+```
+
+```{r}
+# Fit the Logistic GAM
+prob_gam <- gam(
+  completion_flag ~ s(avg_separation_air),
+  data = combined_prob,
+  family = binomial(link = "logit")
+)
+
+# Print Summary (optional, but highly recommended)
+# print(summary(prob_gam))
+```
+
+```{r}
+# Predict the completion probability across the range of separation
+new_data <- data.frame(avg_separation_air = seq(min(combined_prob$avg_separation_air), 
+                                                 max(combined_prob$avg_separation_air), 
+                                                 length.out = 100))
+
+new_data$predicted_prob <- predict(prob_gam, 
+                                   newdata = new_data, 
+                                   type = "response")
+
+# Plot the relationship
+ggplot(new_data, 
+       aes(x = avg_separation_air, y = predicted_prob)) +
+  
+  geom_line(color = "darkred", size = 1.2) +
+  geom_ribbon(aes(ymin = 0, ymax = predicted_prob), fill = "darkred", alpha = 0.3) +
+  
+  # Add horizontal lines for typical completion rates for context
+  geom_hline(yintercept = mean(combined_prob$completion_flag), 
+             linetype = "dashed", color = "gray50") +
+  
+  labs(
+    title = "Completion Probability vs. Ball-in-Air Separation",
+    subtitle = "Modeled using a Logistic GAM",
+    x = "Average Ball-in-Air Separation (yards)",
+    y = "Predicted Completion Probability (0.0 to 1.0)"
+  ) +
+  theme_minimal() +
+  ylim(0, 1) + # Probability must be between 0 and 1
+  xlim(0,10)
+```
+
